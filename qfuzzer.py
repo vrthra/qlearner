@@ -1,5 +1,6 @@
 from functools import reduce, lru_cache
 
+import subprocess
 import string
 import json
 import shutil
@@ -10,83 +11,9 @@ import random
 R = int(os.getenv('R') or '0')
 #random.seed(R)
 
-Grammar = {'<start>': [['<expr>']],
- '<expr>': [['<term>', '+', '<expr>'],
-  ['<term>', '-', '<expr>'],
-  ['<term>']],
- '<term>': [['<factor>', '*', '<term>'],
-  ['<factor>', '/', '<term>'],
-  ['<factor>']],
- '<factor>': [['+', '<factor>'],
-  ['-', '<factor>'],
-  ['(', '<expr>', ')'],
-  ['<integer>', '.', '<integer>'],
-  ['<integer>']],
- '<integer>': [['<digit>', '<integer>'], ['<digit>']],
- '<digit>': [['0'],
-  ['1'],
-  ['2'],
-  ['3'],
-  ['4'],
-  ['5'],
-  ['6'],
-  ['7'],
-  ['8'],
-  ['9']]}
+trainer = os.getenv('T') or 'x'
 
-class Parser(object):
-    def __init__(self, grammar, start_symbol='<start>', log=False):
-        self.start_symbol, self._grammar, self.log = start_symbol, grammar, log
-
-    def grammar(self):
-        return self._grammar
-
-    def parse_prefix(self, text):
-        """Return pair (cursor, forest) for longest prefix of text"""
-        raise NotImplemented()
-
-    def parse(self, text):
-        cursor, forest = self.parse_prefix(text)
-        if cursor < len(text):
-            raise SyntaxError("at " + repr(text[cursor:]))
-        return forest
-
-class PEGParser(Parser):
-    def __init__(self, grammar, start_symbol='<start>', log=False):
-        self.start_symbol, self._grammar, self.log = start_symbol, grammar, log
-        self.cgrammar = grammar
-        self.need_more = False
-
-    def parse_prefix(self, text):
-        self.need_more = False
-        cursor, tree = self.unify_key(self.start_symbol, text, 0)
-        return cursor, [tree]
-
-    @lru_cache(maxsize=None)
-    def unify_key(self, key, text, at=0):
-        if key not in self.cgrammar:
-            if text[at:].startswith(key):
-                return at + len(key), (key, [])
-            else:
-                if not text[at:]: self.need_more = True
-                return at, None
-        for rule in self.cgrammar[key]:
-            to, res = self.unify_rule(rule, text, at)
-            if res:
-                return (to, (key, res))
-        if not text[at:]: self.need_more = True
-        return 0, None
-
-    def unify_rule(self, rule, text, at):
-        results = []
-        for token in rule:
-            at, res = self.unify_key(token, text, at)
-            if res is None:
-                return at, None
-            results.append(res)
-        return at, results
-
-All_Characters = list(string.ascii_letters + string.digits + string.punctuation)
+All_Characters = [i for i in list(string.ascii_letters + string.digits + string.punctuation) if i != "'"]
 class QState:
     Counter = 0
     def __init__(self, key):
@@ -231,15 +158,35 @@ class Reward:
     Complete = 100
     No = 0
 
-POLICY = 'policy.json'
-TPOLICY = 'policy.tmp'
+POLICY = '%s-policy.json' % trainer
+TPOLICY = '%s.tmp' % POLICY
 
-RESULTS = 'results.txt'
-TRESULTS = 'results.tmp'
+RESULTS = '%s-results.txt' % trainer
+TRESULTS = '%s.tmp' % RESULTS
+
+class Executor:
+    def __init__(self):
+        self.pipeline = "echo '%s' | bc"
+        self.error = False
+
+    def run(self, arg):
+        exitcode, result = subprocess.getstatusoutput(self.pipeline % arg)
+        if exitcode != 0 or result.startswith('(standard_in)'):
+            self.error = True
+            if result.startswith('(standard_in) 2:'):
+                self.need_more = True
+            elif result.startswith('(standard_in) 1:'):
+                self.need_more = False
+            else:
+                assert False
+        else:
+            self.error = False
+        return result
+
 class Predictor:
     def __init__(self):
         self.load_policy()
-        self.parser = PEGParser(Grammar)
+        self.executor = Executor()
 
     def get_state(self, arg):
         skey = QState.get_key(arg)
@@ -261,22 +208,22 @@ class Predictor:
                 self.states[k] = QState.from_obj(v)
 
     def process(self, arg):
-        for i in range(1, 100000):
+        for i in range(1, 10000000):
             if len(arg) > 1000: break
             # First, get this state
             skey,state = self.get_state(arg)
-            print("%d: %s, %s" % (QState.Counter, state.key, arg))
 
             # get our next character
             c = state._policy.next_char()
             arg += c
+            print("%d: %s" % (QState.Counter, arg))
             last_max_q = state._policy.max_a_val()
 
             # Now, see how it does.
             reward = Reward.No
-            cursor, tree = self.parser.parse_prefix(arg)
-            if cursor < len(arg):
-                if self.parser.need_more:
+            out = self.executor.run(arg)
+            if self.executor.error:
+                if self.executor.need_more:
                     #print('append')
                     reward = Reward.Append
                 else:
@@ -285,20 +232,24 @@ class Predictor:
                     arg = arg[:-1]
                 state._policy.update(c, last_max_q, reward)
             else:
-                reward = Reward.Complete
-                state._policy.update(c, last_max_q, reward)
-                self.dump_policy()
-                if os.path.exists(RESULTS):
-                    shutil.copy(RESULTS, TRESULTS)
-                with open(TRESULTS, 'w+') as f:
-                    f.write(arg + "\n")
+                if len(arg) > 10:
+                    reward = min(len(arg)*2, Reward.Complete)
+                    state._policy.update(c, last_max_q, reward)
+                    self.dump_policy()
+                    if os.path.exists(RESULTS):
+                        shutil.copy(RESULTS, TRESULTS)
+                    with open(TRESULTS, 'a') as f:
+                        f.write(arg + "\n")
 
-                os.rename(TRESULTS, RESULTS)
-                break
+                    os.rename(TRESULTS, RESULTS)
+                    break
+                else:
+                    reward = Reward.Append
+                    state._policy.update(c, last_max_q, reward)
 
 
 def main(my_vars):
     p = Predictor()
-    p.process(my_vars[1] if len(my_vars) > 1 else '(')
+    p.process(my_vars[1] if len(my_vars) > 1 else '')
 
 main(sys.argv)
