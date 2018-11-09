@@ -11,9 +11,8 @@ import random
 R = int(os.getenv('R') or '0')
 #random.seed(R)
 
-trainer = os.getenv('T') or 'x'
-
 All_Characters = [i for i in list(string.ascii_letters + string.digits + string.punctuation) if i != "'"]
+#All_Characters = [i for i in list(string.printable) if i != "'"]
 class QState:
     Counter = 0
     def __init__(self, key):
@@ -158,30 +157,33 @@ class Reward:
     Complete = 100
     No = 0
 
-POLICY = '%s-policy.json' % trainer
-TPOLICY = '%s.tmp' % POLICY
-
-RESULTS = '%s-results.txt' % trainer
-TRESULTS = '%s.tmp' % RESULTS
-
 class Executor:
+    trainer = 'mjs_s'
     def __init__(self):
-        self.pipeline = "echo '%s' | bc"
+        self.pipeline = "./mjs -e '%s'"
         self.error = False
 
     def run(self, arg):
         exitcode, result = subprocess.getstatusoutput(self.pipeline % arg)
-        if exitcode != 0 or result.startswith('(standard_in)'):
+        if exitcode != 0 or result.startswith('MJS error: parse error at'):
             self.error = True
-            if result.startswith('(standard_in) 2:'):
+            if result.endswith('[]'):
                 self.need_more = True
-            elif result.startswith('(standard_in) 1:'):
+            elif result.endswith(']'):
                 self.need_more = False
             else:
                 assert False
         else:
             self.error = False
         return result
+
+POLICY = '%s/policy.json' % Executor.trainer
+TPOLICY = '%s.tmp' % POLICY
+
+RESULTS = '%s/results.txt' % Executor.trainer
+TRESULTS = '%s.tmp' % RESULTS
+
+
 
 class Predictor:
     def __init__(self):
@@ -208,7 +210,7 @@ class Predictor:
                 self.states[k] = QState.from_obj(v)
 
     def process(self, arg):
-        for i in range(1, 10000000):
+        for i in range(1, 100000):
             if len(arg) > 1000: break
             # First, get this state
             skey,state = self.get_state(arg)
@@ -216,7 +218,7 @@ class Predictor:
             # get our next character
             c = state._policy.next_char()
             arg += c
-            print("%d: %s" % (QState.Counter, arg))
+            print("%d: %s" % (QState.Counter, repr(arg)))
             last_max_q = state._policy.max_a_val()
 
             # Now, see how it does.
@@ -239,7 +241,7 @@ class Predictor:
                     if os.path.exists(RESULTS):
                         shutil.copy(RESULTS, TRESULTS)
                     with open(TRESULTS, 'a') as f:
-                        f.write(arg + "\n")
+                        f.write(json.dumps({'string':arg}) + "\n")
 
                     os.rename(TRESULTS, RESULTS)
                     break
